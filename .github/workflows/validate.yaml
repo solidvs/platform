@@ -1,0 +1,33 @@
+name: validate
+
+# Checks every pull request and every change to main: the platform's own tests, a deploy against
+# the machine's own Docker, and every system file against the rules.
+# Runs on GitHub's hosted machines. Nothing in this workflow reaches a server.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Test the platform rules
+        run: node --test "scripts/*.test.ts"
+      - name: Deploy a system with a migration step to the local Docker
+        run: node --test scripts/deploy.e2e.ts
+      - name: Check the server script
+        run: bash -n bootstrap.sh && shellcheck bootstrap.sh
+      - name: Check every system file
+        run: node scripts/platform.ts validate

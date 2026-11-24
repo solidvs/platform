@@ -1,0 +1,116 @@
+name: deploy
+
+# A merged pull request that touches environments/ deploys the systems it changed.
+# A manual run deploys one system again, to apply a change of variables or secrets.
+# Only the main branch deploys; each GitHub environment must also be restricted to it.
+
+on:
+  push:
+    branches: [main]
+    paths: ["environments/**"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment
+        type: choice
+        options: [staging, production]
+        required: true
+      system:
+        description: System (file name in environments/<environment>/, without .compose.yaml)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.plan.outputs.deploy }}
+      deploy_count: ${{ steps.plan.outputs.deploy_count }}
+      remove: ${{ steps.plan.outputs.remove }}
+      remove_count: ${{ steps.plan.outputs.remove_count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - id: plan
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          SYSTEM: ${{ inputs.system }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            node scripts/platform.ts target "$ENVIRONMENT" "$SYSTEM"
+          else
+            node scripts/platform.ts changes "$BEFORE" "$AFTER"
+          fi
+
+  deploy:
+    needs: plan
+    if: needs.plan.outputs.deploy_count != '0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.deploy) }}
+    # The environment's label chooses the server.
+    runs-on: [self-hosted, "${{ matrix.environment }}"]
+    # One GitHub environment per system and environment: this job sees only its variables and secrets.
+    environment: ${{ matrix.system }}-${{ matrix.environment }}
+    concurrency:
+      group: ${{ matrix.environment }}-${{ matrix.system }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Deploy
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
+          SYSTEM: ${{ matrix.system }}
+          PLATFORM_VARS: ${{ toJSON(vars) }}
+          PLATFORM_SECRETS: ${{ toJSON(secrets) }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          # Registry credentials live for this job only and are never stored on the server.
+          DOCKER_CONFIG="$(mktemp -d)"
+          export DOCKER_CONFIG
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
+          node scripts/platform.ts deploy "$ENVIRONMENT" "$SYSTEM"
+
+  remove:
+    needs: plan
+    if: needs.plan.outputs.remove_count != '0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.remove) }}
+    runs-on: [self-hosted, "${{ matrix.environment }}"]
+    concurrency:
+      group: ${{ matrix.environment }}-${{ matrix.system }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Remove
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
+          SYSTEM: ${{ matrix.system }}
+        run: node scripts/platform.ts remove "$ENVIRONMENT" "$SYSTEM"

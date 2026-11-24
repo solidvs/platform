@@ -1,0 +1,8 @@
+# Local state and editor files
+.DS_Store
+node_modules/
+*.log
+.env
+.env.*
+# Never commit rendered configuration
+config.json
